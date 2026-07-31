@@ -1,5 +1,5 @@
 // whatsapp_auto_forward.js
-// Stable version - July 2026
+// More robust version - handles LOGOUT + destroy safely
 require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
@@ -29,6 +29,7 @@ const KEYWORDS = ['升降機故障', '扶手梯故障'];
 const FORWARDED = new Set();
 const TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
 const CSV_FILE = 'forwarded_messages.csv';
+const AUTH_PATH = path.join(__dirname, '.wwebjs_auth');
 
 if (!fs.existsSync(CSV_FILE)) {
     fs.writeFileSync(CSV_FILE, 'Timestamp,SourceGroup,Message,Sender\n');
@@ -38,7 +39,7 @@ if (!fs.existsSync(CSV_FILE)) {
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: 'tke-forwarder',
-        dataPath: path.join(__dirname, '.wwebjs_auth')
+        dataPath: AUTH_PATH
     }),
     puppeteer: {
         headless: true,
@@ -51,7 +52,6 @@ const client = new Client({
             '--disable-software-rasterizer'
         ]
     }
-    // Removed webVersionCache: { type: 'none' } – usually not needed
 });
 
 // ================== EVENTS ==================
@@ -70,13 +70,25 @@ client.on('auth_failure', (msg) => {
 
 client.on('disconnected', async (reason) => {
     logger.warn(`Disconnected: ${reason}`);
+
+    // If it was a real LOGOUT, clear the session so next start asks for QR again
+    if (reason === 'LOGOUT') {
+        logger.warn('Session was logged out. Clearing auth folder...');
+        try {
+            fs.rmSync(path.join(AUTH_PATH, 'session-tke-forwarder'), { recursive: true, force: true });
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    // Destroy safely
     try {
         await client.destroy();
     } catch (e) {
-        // ignore
+        // ignore destroy errors
     }
-    // Exit so that pm2 / systemd / your process manager can restart cleanly.
-    // This prevents the "page binding already exists" error.
+
+    // Exit so the process can be restarted cleanly
     process.exit(1);
 });
 
@@ -96,7 +108,6 @@ client.on('message', async (message) => {
 
         logger.info(`Keyword detected: ${message.body}`);
 
-        // ===== Forwarding =====
         let forwarded = false;
 
         // Method 1: Native forward
@@ -122,7 +133,6 @@ client.on('message', async (message) => {
             }
         }
 
-        // Log + reply
         if (forwarded) {
             const timestamp = new Date().toISOString();
             const contact = await message.getContact().catch(() => ({}));
@@ -137,14 +147,22 @@ client.on('message', async (message) => {
     }
 });
 
+// ================== SAFETY NET ==================
+process.on('unhandledRejection', (reason) => {
+    logger.error(`Unhandled Rejection: ${reason}`);
+});
+
+process.on('uncaughtException', (err) => {
+    logger.error(`Uncaught Exception: ${err.message}`);
+    // Don't exit immediately on every uncaught error
+});
+
 // ================== GRACEFUL SHUTDOWN ==================
 async function shutdown(signal) {
     logger.info(`Received ${signal}. Shutting down...`);
     try {
         await client.destroy();
-    } catch (e) {
-        // ignore
-    }
+    } catch (e) {}
     process.exit(0);
 }
 
