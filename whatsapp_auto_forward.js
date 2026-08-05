@@ -117,6 +117,7 @@ client.on('message', async (message) => {
             forwarded = true;
         } catch (err) {
             logger.warn(`Native forward failed: ${err.message}`);
+            logger.warn(`Full error: ${JSON.stringify(err, Object.getOwnPropertyNames(err))}`);
         }
 
         // Method 2: Fallback
@@ -125,11 +126,17 @@ client.on('message', async (message) => {
                 const contact = await message.getContact().catch(() => null);
                 const name = contact?.pushname || contact?.number || 'Unknown';
                 const targetChat = await client.getChatById(TARGET_GROUP);
+
+                if (!targetChat) {
+                    throw new Error('Target group not found / bot is not in the group');
+                }
+                
                 await targetChat.sendMessage(`[Forwarded from ${name}]:\n${message.body}`);
                 logger.info('✅ Fallback send successful');
                 forwarded = true;
             } catch (err2) {
                 logger.error(`Fallback also failed: ${err2.message}`);
+                logger.error(`Full fallback error: ${JSON.stringify(err2, Object.getOwnPropertyNames(err2))}`);
             }
         }
 
